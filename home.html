@@ -778,7 +778,20 @@
       </section>
     </main>
 
-    <script type="module">
+    <script>
+      (function () {
+        const offline = localStorage.getItem("offline_mode") === "1";
+        if (offline || !navigator.onLine) {
+          const mod = document.querySelector("script[data-app-module]");
+          if (mod) mod.remove();
+          const s = document.createElement("script");
+          s.src = "offline.js";
+          document.body.appendChild(s);
+        }
+      })();
+    </script>
+
+    <script type="module" data-app-module>
   import { auth, db } from "./firebase-config.js";
   import {
     onAuthStateChanged,
@@ -1006,6 +1019,7 @@
   renderEmojiGrid();
 
   let currentUser = null;
+  const offlineChats = { self: [], saved: [] };
   let activeChat = null;
   let activeChatType = null; // self | saved | direct
   let replyTargetId = null;
@@ -1132,6 +1146,7 @@
 
   async function openContact(name, avatarSrc, activeEl, chatId, type, otherUid) {
     if (!currentUser) return;
+    const isOffline = currentUser.uid === "offline-demo";
     chatPlaceholder.hidden = true;
     chatContent.hidden = false;
     chatName.textContent = name;
@@ -1149,6 +1164,12 @@
 
     activeChat = chatId;
     activeChatType = type;
+
+    if (isOffline) {
+      currentMessages = offlineChats[chatId] || [];
+      renderMessages();
+      return;
+    }
 
     if (type === "direct") {
       const chatDoc = doc(db, "chats", chatId);
@@ -1198,6 +1219,27 @@
     const text = chatInput.value.trim();
     if (!text) return;
     if (!activeChat || !currentUser) return;
+    const isOffline = currentUser.uid === "offline-demo";
+
+    if (isOffline) {
+      const msg = {
+        id: `offline-${Date.now()}`,
+        text,
+        type: "text",
+        senderId: currentUser.uid,
+        replyTo: replyTargetId || null,
+        createdAt: new Date(),
+        reactions: [],
+      };
+      offlineChats[activeChat] = offlineChats[activeChat] || [];
+      offlineChats[activeChat].push(msg);
+      currentMessages = offlineChats[activeChat];
+      renderMessages();
+      chatInput.value = "";
+      resizeInput();
+      clearReply();
+      return;
+    }
 
     let messagesRef;
     if (activeChatType === "direct") {
@@ -1223,6 +1265,11 @@
   async function uploadAttachment() {
     const file = fileInput.files[0];
     if (!file || !currentUser || !activeChat) return;
+    if (currentUser.uid === "offline-demo") {
+      alert("Attachments are not available in offline mode.");
+      fileInput.value = "";
+      return;
+    }
 
     const path = `uploads/${currentUser.uid}/${activeChat}/${Date.now()}-${file.name}`;
     const storageRef = ref(storage, path);
@@ -1261,6 +1308,12 @@
   }
 
   async function deleteMessage(msgId) {
+    if (currentUser && currentUser.uid === "offline-demo") {
+      offlineChats[activeChat] = (offlineChats[activeChat] || []).filter((m) => m.id !== msgId);
+      currentMessages = offlineChats[activeChat];
+      renderMessages();
+      return;
+    }
     const ref = activeChatType === "direct"
       ? doc(db, "chats", activeChat, "messages", msgId)
       : doc(db, "users", currentUser.uid, "chats", activeChat, "messages", msgId);
@@ -1269,6 +1322,12 @@
 
   async function clearActiveChat() {
     if (!currentUser || !activeChat) return;
+    if (currentUser.uid === "offline-demo") {
+      offlineChats[activeChat] = [];
+      currentMessages = [];
+      renderMessages();
+      return;
+    }
     const messagesRef = getMessagesRef();
     if (!messagesRef) return;
     const snap = await getDocs(messagesRef);
@@ -1278,6 +1337,7 @@
 
   function scheduleTyping() {
     if (!activeChat || activeChatType !== "direct" || !currentUser) return;
+    if (currentUser.uid === "offline-demo") return;
     const typingDoc = doc(db, "chats", activeChat, "typing", currentUser.uid);
     setDoc(typingDoc, {
       uid: currentUser.uid,
@@ -1297,6 +1357,7 @@
 
   async function toggleReaction(msgId, emoji) {
     if (!activeChat || !currentUser) return;
+    if (currentUser.uid === "offline-demo") return;
     const msg = currentMessages.find((m) => m.id === msgId);
     if (!msg) return;
 
@@ -1380,6 +1441,10 @@
   async function addFriendByEmail() {
     const email = friendEmail.value.trim().toLowerCase();
     if (!email || !currentUser) return;
+    if (currentUser.uid === "offline-demo") {
+      alert("Friends are not available in offline mode.");
+      return;
+    }
     if (email === currentUser.email?.toLowerCase()) return;
 
     const usersRef = collection(db, "users");
@@ -1406,6 +1471,7 @@
   addFriendBtn.addEventListener("click", addFriendByEmail);
 
   async function acceptRequest(req) {
+    if (currentUser.uid === "offline-demo") return;
     const chatId = [currentUser.uid, req.fromUid].sort().join("_");
     const chatDoc = doc(db, "chats", chatId);
     await setDoc(chatDoc, { participants: [currentUser.uid, req.fromUid], updatedAt: serverTimestamp() }, { merge: true });
@@ -1413,6 +1479,7 @@
   }
 
   async function declineRequest(req) {
+    if (currentUser.uid === "offline-demo") return;
     await deleteDoc(doc(db, "users", currentUser.uid, "requests", req.fromUid));
   }
 
@@ -1544,35 +1611,57 @@
 
   onAuthStateChanged(auth, async (user) => {
     if (!user) {
-      window.location.href = "login.html";
+      const offline = localStorage.getItem("offline_mode") === "1";
+      if (offline) {
+        currentUser = { uid: "offline-demo", email: "offline@demo", displayName: "Offline User" };
+        chatSection.hidden = false;
+        homeTitle.hidden = true;
+        const betaContact = {
+          uid: "offline-friend",
+          name: "Beta Friend",
+          email: "beta@offline",
+        };
+        currentFriendsData = [betaContact];
+        renderFriends(currentFriendsData);
+      } else {
+        window.location.href = "login.html";
+        return;
+      }
+    } else {
+      currentUser = user;
+    }
+
+    if (currentUser.uid === "offline-demo") {
+      profileName.value = currentUser.displayName || "";
+      profileStatus.value = "Offline mode";
+      renderFriends([]);
       return;
     }
-    currentUser = user;
 
-    const userDoc = doc(db, "users", user.uid);
+    const userDoc = doc(db, "users", currentUser.uid);
     const userSnap = await getDoc(userDoc);
     if (!userSnap.exists()) {
       await setDoc(userDoc, {
-        uid: user.uid,
-        email: user.email || "",
-        name: user.displayName || "",
+        uid: currentUser.uid,
+        email: currentUser.email || "",
+        name: currentUser.displayName || "",
         status: "",
         createdAt: serverTimestamp(),
       });
     }
 
-    const presenceDoc = doc(db, "presence", user.uid);
-    await setDoc(presenceDoc, { uid: user.uid, state: "online", lastSeen: serverTimestamp() }, { merge: true });
+    const presenceDoc = doc(db, "presence", currentUser.uid);
+    await setDoc(presenceDoc, { uid: currentUser.uid, state: "online", lastSeen: serverTimestamp() }, { merge: true });
     setInterval(() => {
-      setDoc(presenceDoc, { uid: user.uid, state: "online", lastSeen: serverTimestamp() }, { merge: true });
+      setDoc(presenceDoc, { uid: currentUser.uid, state: "online", lastSeen: serverTimestamp() }, { merge: true });
     }, 30000);
     window.addEventListener("beforeunload", () => {
-      setDoc(presenceDoc, { uid: user.uid, state: "offline", lastSeen: serverTimestamp() }, { merge: true });
+      setDoc(presenceDoc, { uid: currentUser.uid, state: "offline", lastSeen: serverTimestamp() }, { merge: true });
     });
 
     if (unsubscribeChats) unsubscribeChats();
     const chatsRef = collection(db, "chats");
-    const chatsQuery = query(chatsRef, where("participants", "array-contains", user.uid));
+    const chatsQuery = query(chatsRef, where("participants", "array-contains", currentUser.uid));
     unsubscribeChats = onSnapshot(chatsQuery, async (snap) => {
       const chats = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
       const otherIds = Array.from(
@@ -1615,3 +1704,4 @@
 
 
 
+  
